@@ -1,0 +1,124 @@
+# ============================
+# MTD-YOLO Algorithm-jwl
+# ============================
+
+# Input: RGB_Image (512x512), IR_Image (512x512)(or SAR_Image)
+# Output: Detected_Objects (Bounding Boxes, Classes, Scores)
+
+# ============================
+# Pixel-Level Multimodal Fusion Block (PFB)
+# ============================
+def PixelLevelFusion(RGB_Image, IR_Image):
+    # Normalize input images to [0,1]
+    RGB_Image = Normalize(RGB_Image)
+    IR_Image = Normalize(IR_Image)
+
+    # Downsample RGB and IR features
+    RGB_Feature = Convolution(RGB_Image, kernel_size=1, filters=64, stride=1, padding='same')
+    IR_Feature = Convolution(IR_Image, kernel_size=1, filters=64, stride=1, padding='same')
+
+    # Generate attention maps
+    RGB_Attention = Attention_Block(RGB_Feature, type='channel+spatial')
+    IR_Attention = Attention_Block(IR_Feature, type='channel+spatial')
+
+    # Element-wise multiplication with attention maps
+    RGB_Weighted = ElementWiseMultiply(RGB_Feature, RGB_Attention)
+    IR_Weighted = ElementWiseMultiply(IR_Feature, IR_Attention)
+
+    # Combine features using concatenation and convolution
+    Combined_Feature = Concat([RGB_Weighted, IR_Weighted], axis='channel')
+    Fused_Feature = Convolution(Combined_Feature, kernel_size=1, filters=128, stride=1, padding='same')
+
+    return Fused_Feature
+
+# ============================
+# Weighted Convolutional Attention Module (WCAM)
+# ============================
+def WCAM(Feature_Map, alpha=0.5, reduction=16):
+    # Global Average and Max Pooling
+    GAP_Feature = GlobalAveragePooling(Feature_Map)
+    GMP_Feature = GlobalMaxPooling(Feature_Map)
+
+    # Weighted Sum of GAP and GMP
+    Weighted_Feature = alpha * GMP_Feature + (1 - alpha) * GAP_Feature
+
+    # Shared Multilayer Perceptron (SMLP)
+    SMLP_Feature = Dense(Weighted_Feature, units=Feature_Map.shape[-1] // reduction, activation='relu')
+    Channel_Weights = Dense(SMLP_Feature, units=Feature_Map.shape[-1], activation='sigmoid')
+
+    # Apply Channel Attention
+    Refined_Channel_Feature = Multiply(Feature_Map, Channel_Weights)
+
+    # Spatial Attention (Convolutional Block Attention Module style)
+    Spatial_Weights = Convolution(Refined_Channel_Feature, kernel_size=7, filters=1, stride=1, activation='sigmoid')
+    Refined_Spatial_Feature = Multiply(Refined_Channel_Feature, Spatial_Weights)
+
+    # Residual Connection for better feature learning
+    Final_Feature = Add([Refined_Spatial_Feature, Feature_Map])
+
+    return Final_Feature
+
+# ============================
+# Bi-Symmetric Simplified Feature Pyramid Network (BSS-FPN)
+# ============================
+def BSS_FPN(Features):
+    # Define weight factors
+    TopDown_Weights = LearnableWeights(len(Features))
+    BottomUp_Weights = LearnableWeights(len(Features))
+
+    # Top-down pathway
+    TopDown_Features = []
+    for i in range(len(Features) - 1, 0, -1):
+        Upsampled_Feature = Upsample(Features[i], scale=2)
+        Fused_Feature = WeightedSum(Features[i - 1], Upsampled_Feature, TopDown_Weights[i])
+        TopDown_Features.append(Convolution(Fused_Feature, kernel_size=3, filters=Features[i].shape[-1], padding='same'))
+
+    # Bottom-up pathway
+    BottomUp_Features = []
+    for i in range(len(TopDown_Features)):
+        Downsampled_Feature = Downsample(TopDown_Features[i], scale=2)
+        Fused_Feature = WeightedSum(TopDown_Features[i - 1], Downsampled_Feature, BottomUp_Weights[i])
+        BottomUp_Features.append(Convolution(Fused_Feature, kernel_size=3, filters=TopDown_Features[i].shape[-1], padding='same'))
+
+    return BottomUp_Features
+
+# ============================
+# Varifocal Loss
+# ============================
+def Varifocal_Loss(predictions, ground_truth, IoU, alpha=0.25, gamma=2.0):
+    # Positive samples loss
+    Positive_Loss = -IoU * ground_truth * log(predictions)
+
+    # Negative samples loss with weighting
+    Negative_Loss = -alpha * (predictions ** gamma) * (1 - ground_truth) * log(1 - predictions)
+
+    # Combine positive and negative losses
+    Total_Loss = Positive_Loss + Negative_Loss
+
+    return Total_Loss.mean()
+
+# ============================
+# Main MTD-YOLO Pipeline
+# ============================
+def MTD_YOLO(RGB_Image, IR_Image):
+    # Step 1: Preprocessing
+    Preprocessed_Features = PixelLevelFusion(RGB_Image, IR_Image)
+
+    # Step 2: Backbone Network
+    Backbone_Features = YOLO_Backbone(Preprocessed_Features)
+
+    # Step 3: Apply Weighted Convolutional Attention Mechanism
+    Attention_Enhanced_Features = []
+    for Feature_Map in Backbone_Features:
+        Attention_Enhanced_Features.append(WCAM(Feature_Map))
+
+    # Step 4: Feature Fusion with BSS-FPN
+    MultiScale_Features = BSS_FPN(Attention_Enhanced_Features)
+
+    # Step 5: Prediction Layer
+    Detection_Results = YOLO_Detection_Head(MultiScale_Features)
+
+    # Step 6: Postprocessing
+    Bounding_Boxes, Classes, Confidence_Scores = PostProcess(Detection_Results)
+
+    return Bounding_Boxes, Classes, Confidence_Scores
